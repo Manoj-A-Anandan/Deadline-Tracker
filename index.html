@@ -678,6 +678,42 @@
 
   /* Responsive */
   @media (max-width: 768px) {
+    .main {
+  width: 100%;
+}
+
+.topbar {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.search-box input {
+  width: 100%;
+}
+
+.sort-select {
+  width: 100%;
+}
+
+.add-btn {
+  width: 100%;
+}
+
+.task-card {
+  padding: 14px;
+}
+
+.task-title {
+  font-size: 13px;
+}
+
+.task-desc {
+  padding-left: 0;
+}
+
+.task-meta {
+  padding-left: 0;
+}
     .sidebar { display: none; }
     .topbar { padding: 14px 16px; }
     .task-area { padding: 16px; }
@@ -918,508 +954,134 @@
 <!-- Toast Container -->
 <div class="toast-container" id="toast-container"></div>
 
-<script>
-// ─── State ───────────────────────────────────────────────────────────────────
-let tasks = JSON.parse(localStorage.getItem('deadline_tasks') || '[]');
-let currentView = 'all';
-let editingId = null;
-let pendingAttachments = []; // {name, size, type, data}
-let notifEnabled = false;
-let notifInterval = null;
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { 
+  getFirestore, collection, addDoc, getDocs, deleteDoc, doc, updateDoc, onSnapshot 
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
-// ─── Utilities ───────────────────────────────────────────────────────────────
-function save() { localStorage.setItem('deadline_tasks', JSON.stringify(tasks)); }
-function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
-
-function getDateStatus(dateStr, completed) {
-  if (completed) return 'done';
-  if (!dateStr) return 'upcoming';
-  const now = new Date();
-  const d = new Date(dateStr);
-  const diff = d - now;
-  if (diff < 0) return 'overdue';
-  if (diff < 24 * 60 * 60 * 1000) return 'today';
-  if (diff < 7 * 24 * 60 * 60 * 1000) return 'soon';
-  return 'upcoming';
-}
-
-function formatDate(dateStr) {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
-  return d.toLocaleString('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: true
-  });
-}
-
-function getCountdown(dateStr, completed) {
-  if (completed) return { label: 'Done', cls: 'countdown-done' };
-  if (!dateStr) return null;
-  const diff = new Date(dateStr) - new Date();
-  if (diff < 0) {
-    const h = Math.abs(Math.floor(diff / 3600000));
-    return { label: h < 24 ? `${h}h overdue` : `${Math.floor(h/24)}d overdue`, cls: 'countdown-overdue' };
-  }
-  const h = Math.floor(diff / 3600000);
-  if (h < 24) return { label: h < 1 ? '<1h left' : `${h}h left`, cls: 'countdown-today' };
-  const days = Math.floor(diff / 86400000);
-  if (days <= 7) return { label: `${days}d left`, cls: 'countdown-soon' };
-  return { label: `${days}d left`, cls: 'countdown-future' };
-}
-
-function priorityOrder(p) { return { critical: 0, high: 1, medium: 2, low: 3 }[p] ?? 4; }
-
-function fileIcon(type) {
-  if (type.startsWith('image/')) return '🖼️';
-  if (type.includes('pdf')) return '📄';
-  if (type.includes('word') || type.includes('doc')) return '📝';
-  if (type.includes('sheet') || type.includes('excel') || type.includes('xlsx')) return '📊';
-  if (type.includes('ppt') || type.includes('presentation')) return '📋';
-  if (type.includes('zip') || type.includes('compressed')) return '🗜️';
-  return '📎';
-}
-
-function formatSize(bytes) {
-  if (bytes < 1024) return bytes + 'B';
-  if (bytes < 1048576) return (bytes/1024).toFixed(1) + 'KB';
-  return (bytes/1048576).toFixed(1) + 'MB';
-}
-
-// ─── Counts ──────────────────────────────────────────────────────────────────
-function updateCounts() {
-  const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const endOfDay = new Date(startOfDay.getTime() + 86400000);
-
-  const active = tasks.filter(t => t.status !== 'completed');
-  const completed = tasks.filter(t => t.status === 'completed');
-  const overdue = active.filter(t => t.deadline && new Date(t.deadline) < now);
-  const today = active.filter(t => t.deadline && new Date(t.deadline) >= startOfDay && new Date(t.deadline) < endOfDay);
-  const upcoming = active.filter(t => t.deadline && new Date(t.deadline) >= endOfDay);
-  const inprogress = tasks.filter(t => t.status === 'inprogress');
-
-  document.getElementById('count-all').textContent = tasks.length;
-  document.getElementById('count-today').textContent = today.length;
-  document.getElementById('count-upcoming').textContent = upcoming.length;
-  document.getElementById('count-overdue').textContent = overdue.length;
-  document.getElementById('count-inprogress').textContent = inprogress.length;
-  document.getElementById('count-completed').textContent = completed.length;
-
-  ['critical','high','medium','low'].forEach(p => {
-    document.getElementById('count-'+p).textContent = tasks.filter(t => t.priority === p && t.status !== 'completed').length;
-  });
-
-  document.getElementById('stat-total').textContent = tasks.length;
-  document.getElementById('stat-overdue').textContent = overdue.length;
-  document.getElementById('stat-today').textContent = today.length;
-  document.getElementById('stat-done').textContent = completed.length;
-}
-
-// ─── Views ───────────────────────────────────────────────────────────────────
-const viewTitles = {
-  all: 'All Tasks', today: 'Due Today', upcoming: 'Upcoming',
-  overdue: 'Overdue', inprogress: 'In Progress', completed: 'Completed',
-  history: 'Completed History', critical: 'Critical Priority',
-  high: 'High Priority', medium: 'Medium Priority', low: 'Low Priority'
+// 🔥 YOUR FIREBASE CONFIG
+const firebaseConfig = {
+  apiKey: "AIzaSyBLEyVpz3HsUXTe-EAAObgnznF406V89dY",
+  authDomain: "deadline-tracker-personalized.firebaseapp.com",
+  projectId: "deadline-tracker-personalized",
+  storageBucket: "deadline-tracker-personalized.firebasestorage.app",
+  messagingSenderId: "516612768039",
+  appId: "1:516612768039:web:2022b047f4ea91b2b5a902",
+  measurementId: "G-KMPWGL9PXS"
 };
 
-function setView(v) {
-  currentView = v;
-  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-  event.currentTarget.classList.add('active');
-  document.getElementById('view-title').textContent = viewTitles[v] || v;
+// Init Firebase
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+// ─── STATE ─────────────────────────────────────────
+let tasks = [];
+let currentView = 'all';
+let editingId = null;
+let pendingAttachments = [];
+
+// ─── FIREBASE REALTIME LISTENER ───────────────────
+const colRef = collection(db, "tasks");
+
+onSnapshot(colRef, (snapshot) => {
+  tasks = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
   renderTasks();
-}
+});
 
-function getFilteredTasks() {
-  const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const endOfDay = new Date(startOfDay.getTime() + 86400000);
-  const q = document.getElementById('search-input').value.toLowerCase();
+// ─── SAVE TASK ─────────────────────────────────────
+async function saveTask() {
+  const title = document.getElementById('f-title').value.trim();
+  if (!title) return;
 
-  let filtered = tasks.filter(t => {
-    if (q) return (t.title+t.description+t.label).toLowerCase().includes(q);
-    return true;
-  });
+  const dateVal = document.getElementById('f-date').value;
 
-  if (currentView === 'today') filtered = filtered.filter(t => t.status !== 'completed' && t.deadline && new Date(t.deadline) >= startOfDay && new Date(t.deadline) < endOfDay);
-  else if (currentView === 'upcoming') filtered = filtered.filter(t => t.status !== 'completed' && t.deadline && new Date(t.deadline) >= endOfDay);
-  else if (currentView === 'overdue') filtered = filtered.filter(t => t.status !== 'completed' && t.deadline && new Date(t.deadline) < now);
-  else if (currentView === 'inprogress') filtered = filtered.filter(t => t.status === 'inprogress');
-  else if (currentView === 'completed' || currentView === 'history') filtered = filtered.filter(t => t.status === 'completed');
-  else if (['critical','high','medium','low'].includes(currentView)) filtered = filtered.filter(t => t.priority === currentView && t.status !== 'completed');
+  const task = {
+    title,
+    description: document.getElementById('f-desc').value,
+    deadline: dateVal ? new Date(dateVal).toISOString() : null,
+    priority: document.getElementById('f-priority').value,
+    status: document.getElementById('f-status').value,
+    label: document.getElementById('f-label').value,
+    attachments: pendingAttachments,
+    createdAt: new Date().toISOString()
+  };
 
-  const sort = document.getElementById('sort-select').value;
-  filtered.sort((a, b) => {
-    if (sort === 'date-asc') return new Date(a.deadline||'9999') - new Date(b.deadline||'9999');
-    if (sort === 'date-desc') return new Date(b.deadline||'0') - new Date(a.deadline||'0');
-    if (sort === 'priority') return priorityOrder(a.priority) - priorityOrder(b.priority);
-    if (sort === 'title') return a.title.localeCompare(b.title);
-    return new Date(b.createdAt) - new Date(a.createdAt);
-  });
-
-  return filtered;
-}
-
-// ─── Render ───────────────────────────────────────────────────────────────────
-function renderTasks() {
-  updateCounts();
-  const filtered = getFilteredTasks();
-  const list = document.getElementById('task-list');
-  const empty = document.getElementById('empty-state');
-
-  if (currentView === 'history') { renderHistory(filtered); return; }
-
-  if (filtered.length === 0) {
-    list.innerHTML = '';
-    empty.style.display = 'flex';
-    return;
-  }
-  empty.style.display = 'none';
-
-  // Show overdue banner
-  const now = new Date();
-  const overdueTasks = filtered.filter(t => t.status !== 'completed' && t.deadline && new Date(t.deadline) < now);
-  let html = '';
-  if (currentView === 'all' && overdueTasks.length > 0) {
-    html += `<div class="overdue-banner">⚠ ${overdueTasks.length} task${overdueTasks.length > 1 ? 's' : ''} past deadline — action required</div>`;
-  }
-
-  // Group by sections for 'all' view
-  if (currentView === 'all' && !document.getElementById('search-input').value) {
-    const overdue = filtered.filter(t => t.status !== 'completed' && t.deadline && new Date(t.deadline) < now);
-    const today_ = filtered.filter(t => t.status !== 'completed' && t.deadline && new Date(t.deadline) >= new Date(now.getFullYear(),now.getMonth(),now.getDate()) && new Date(t.deadline) < new Date(now.getFullYear(),now.getMonth(),now.getDate(),23,59,59));
-    const upcoming_ = filtered.filter(t => t.status !== 'completed' && (!t.deadline || new Date(t.deadline) >= new Date(now.getFullYear(),now.getMonth(),now.getDate()+1)));
-    const done_ = filtered.filter(t => t.status === 'completed');
-
-    if (overdue.length) html += section('Overdue', overdue);
-    if (today_.length) html += section('Today', today_);
-    if (upcoming_.length) html += section('Upcoming', upcoming_);
-    if (done_.length) html += section('Completed', done_);
+  if (editingId) {
+    await updateDoc(doc(db, "tasks", editingId), task);
   } else {
-    filtered.forEach(t => { html += taskCard(t); });
+    await addDoc(colRef, task);
   }
 
-  list.innerHTML = html;
+  closeModal();
 }
 
-function section(title, items) {
-  return `<div class="section-header"><div class="section-label">${title}</div><div class="section-line"></div></div>` +
-    items.map(taskCard).join('');
+// ─── DELETE TASK ───────────────────────────────────
+async function deleteTask(id) {
+  await deleteDoc(doc(db, "tasks", id));
 }
 
-function taskCard(t) {
-  const ds = getDateStatus(t.deadline, t.status === 'completed');
-  const cd = getCountdown(t.deadline, t.status === 'completed');
-  const isOverdue = ds === 'overdue';
-  const hasAtt = t.attachments && t.attachments.length > 0;
-
-  return `<div class="task-card priority-${t.priority} ${isOverdue ? 'overdue' : ''} ${t.status === 'completed' ? 'completed' : ''}"
-    onclick="openDetail('${t.id}')">
-    <div class="task-header">
-      <div class="task-check" onclick="event.stopPropagation();toggleComplete('${t.id}')">${t.status === 'completed' ? '✓' : ''}</div>
-      <div class="task-title">${escHtml(t.title)}</div>
-      <div class="task-actions">
-        <button class="action-btn" onclick="event.stopPropagation();openEdit('${t.id}')" title="Edit">✎</button>
-        <button class="action-btn delete" onclick="event.stopPropagation();deleteTask('${t.id}')" title="Delete">✕</button>
-      </div>
-    </div>
-    ${t.description ? `<div class="task-desc">${escHtml(t.description)}</div>` : ''}
-    <div class="task-meta">
-      ${t.deadline ? `<div class="task-date ${ds}">📅 ${formatDate(t.deadline)}</div>` : '<div class="task-date upcoming">📅 No deadline</div>'}
-      ${cd ? `<span class="task-countdown ${cd.cls}">${cd.label}</span>` : ''}
-      <span class="priority-badge p-${t.priority}">${t.priority}</span>
-      ${t.label ? `<span class="priority-badge" style="background:var(--surface2);color:var(--text-muted)">${escHtml(t.label)}</span>` : ''}
-      ${hasAtt ? `<span class="attachment-badge">📎 ${t.attachments.length}</span>` : ''}
-    </div>
-  </div>`;
-}
-
-function renderHistory(filtered) {
-  const list = document.getElementById('task-list');
-  const empty = document.getElementById('empty-state');
-  if (filtered.length === 0) { list.innerHTML = ''; empty.style.display = 'flex'; return; }
-  empty.style.display = 'none';
-  list.innerHTML = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px">` +
-    filtered.map(t => `<div class="history-entry">
-      <div class="history-dot"></div>
-      <div>
-        <div class="history-title">${escHtml(t.title)}</div>
-        <div class="history-date">${t.deadline ? 'Deadline: ' + formatDate(t.deadline) : 'No deadline'} &nbsp;·&nbsp; ${t.priority} priority</div>
-      </div>
-      <div class="history-completed">✓ Done</div>
-    </div>`).join('') + `</div>`;
-}
-
-function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-// ─── Task Actions ──────────────────────────────────────────────────────────
-function toggleComplete(id) {
+// ─── TOGGLE COMPLETE ──────────────────────────────
+async function toggleComplete(id) {
   const t = tasks.find(x => x.id === id);
   if (!t) return;
-  if (t.status === 'completed') { t.status = 'todo'; }
-  else { t.status = 'completed'; t.completedAt = new Date().toISOString(); showToast('success','Task completed!',t.title,'✓'); }
-  save(); renderTasks();
+
+  const newStatus = t.status === "completed" ? "todo" : "completed";
+
+  await updateDoc(doc(db, "tasks", id), {
+    status: newStatus,
+    completedAt: newStatus === "completed" ? new Date().toISOString() : null
+  });
 }
 
-function deleteTask(id) {
-  if (!confirm('Delete this task?')) return;
-  tasks = tasks.filter(x => x.id !== id);
-  save(); renderTasks();
-  showToast('warning','Task deleted','','🗑');
-}
-
-// ─── Modal ────────────────────────────────────────────────────────────────
-function openAddModal() {
-  editingId = null;
-  pendingAttachments = [];
-  document.getElementById('modal-title').textContent = 'New Task';
-  document.getElementById('f-title').value = '';
-  document.getElementById('f-desc').value = '';
-  const dt = new Date(); dt.setHours(dt.getHours()+1); dt.setMinutes(0,0,0);
-  document.getElementById('f-date').value = dt.toISOString().slice(0,16);
-  document.getElementById('f-priority').value = 'medium';
-  document.getElementById('f-status').value = 'todo';
-  document.getElementById('f-label').value = '';
-  document.getElementById('f-files').value = '';
-  renderAttachmentPreview();
-  document.getElementById('task-modal').classList.add('open');
-  document.getElementById('f-title').focus();
-}
-
+// ─── EDIT TASK ─────────────────────────────────────
 function openEdit(id) {
   const t = tasks.find(x => x.id === id);
   if (!t) return;
+
   editingId = id;
-  pendingAttachments = (t.attachments || []).map(a => ({...a}));
-  document.getElementById('modal-title').textContent = 'Edit Task';
+  pendingAttachments = t.attachments || [];
+
   document.getElementById('f-title').value = t.title;
   document.getElementById('f-desc').value = t.description || '';
   document.getElementById('f-date').value = t.deadline ? new Date(t.deadline).toISOString().slice(0,16) : '';
   document.getElementById('f-priority').value = t.priority;
   document.getElementById('f-status').value = t.status;
   document.getElementById('f-label').value = t.label || '';
-  document.getElementById('f-files').value = '';
-  renderAttachmentPreview();
+
   document.getElementById('task-modal').classList.add('open');
 }
 
-function closeModal() { document.getElementById('task-modal').classList.remove('open'); }
-
-function saveTask() {
-  const title = document.getElementById('f-title').value.trim();
-  if (!title) { document.getElementById('f-title').style.borderColor = 'var(--red)'; return; }
-  document.getElementById('f-title').style.borderColor = '';
-
-  const dateVal = document.getElementById('f-date').value;
-  const task = {
-    title,
-    description: document.getElementById('f-desc').value.trim(),
-    deadline: dateVal ? new Date(dateVal).toISOString() : null,
-    priority: document.getElementById('f-priority').value,
-    status: document.getElementById('f-status').value,
-    label: document.getElementById('f-label').value.trim(),
-    attachments: [...pendingAttachments],
-  };
-
-  if (editingId) {
-    const idx = tasks.findIndex(x => x.id === editingId);
-    tasks[idx] = { ...tasks[idx], ...task, updatedAt: new Date().toISOString() };
-    showToast('success','Task updated!',title,'✎');
-  } else {
-    tasks.push({ ...task, id: uid(), createdAt: new Date().toISOString() });
-    showToast('success','Task added!',title,'✓');
+// ─── BASIC RENDER (reuse your UI) ──────────────────
+function renderTasks() {
+  const list = document.getElementById('task-list');
+  if (!tasks.length) {
+    list.innerHTML = "<p style='padding:20px'>No tasks yet</p>";
+    return;
   }
 
-  save(); closeModal(); renderTasks();
-}
-
-// ─── File Attachments ─────────────────────────────────────────────────────
-function handleFiles(files) {
-  const maxSize = 5 * 1024 * 1024;
-  Array.from(files).forEach(file => {
-    if (file.size > maxSize) { showToast('warning','File too large',file.name + ' exceeds 5MB','⚠'); return; }
-    const reader = new FileReader();
-    reader.onload = e => {
-      pendingAttachments.push({ name: file.name, size: file.size, type: file.type, data: e.target.result });
-      renderAttachmentPreview();
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-function renderAttachmentPreview() {
-  const el = document.getElementById('attachments-preview');
-  el.innerHTML = pendingAttachments.map((a, i) => `
-    <div class="attachment-item">
-      <span class="attachment-icon">${fileIcon(a.type)}</span>
-      <span class="attachment-name">${escHtml(a.name)}</span>
-      <span class="attachment-size">${formatSize(a.size)}</span>
-      <button class="attachment-del" onclick="removePendingAtt(${i})">✕</button>
-    </div>`).join('');
-}
-
-function removePendingAtt(i) { pendingAttachments.splice(i,1); renderAttachmentPreview(); }
-
-// Drag & drop
-const dz = document.getElementById('drop-zone');
-dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
-dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
-dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('drag-over'); handleFiles(e.dataTransfer.files); });
-
-// ─── Detail Modal ──────────────────────────────────────────────────────────
-function openDetail(id) {
-  const t = tasks.find(x => x.id === id);
-  if (!t) return;
-  const cd = getCountdown(t.deadline, t.status === 'completed');
-  const ds = getDateStatus(t.deadline, t.status === 'completed');
-
-  document.getElementById('detail-title-el').textContent = t.title;
-  document.getElementById('detail-edit-btn').onclick = () => { closeDetailModal(); openEdit(id); };
-
-  // Find first image attachment
-  const imgAtt = t.attachments?.find(a => a.type.startsWith('image/'));
-  const otherAtt = t.attachments?.filter(a => !a.type.startsWith('image/')) || [];
-  const imgAtts = t.attachments?.filter(a => a.type.startsWith('image/')) || [];
-
-  let body = '';
-  if (imgAtt) {
-    body += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:4px">
-      ${imgAtts.map(a => `<img src="${a.data}" class="detail-img" alt="${escHtml(a.name)}" style="cursor:pointer" onclick="window.open('${a.data}','_blank')">`).join('')}
-    </div>`;
-  }
-  body += `
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-      <span class="priority-badge p-${t.priority}">${t.priority}</span>
-      ${cd ? `<span class="task-countdown ${cd.cls}">${cd.label}</span>` : ''}
-      <span class="priority-badge" style="background:var(--${t.status==='completed'?'green':t.status==='inprogress'?'blue':'surface3'}-dim,var(--surface2));color:var(--${t.status==='completed'?'green':t.status==='inprogress'?'purple':'text-muted'})">${t.status}</span>
-      ${t.label ? `<span class="priority-badge" style="background:var(--surface2);color:var(--text-muted)">${escHtml(t.label)}</span>` : ''}
-    </div>`;
-
-  if (t.description) body += `<p style="font-size:12px;color:var(--text-muted);line-height:1.7;margin-bottom:12px;white-space:pre-wrap">${escHtml(t.description)}</p>`;
-
-  body += `<div style="display:flex;flex-direction:column;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:16px">`;
-  if (t.deadline) body += `<div>📅 <strong>Deadline:</strong> ${formatDate(t.deadline)}</div>`;
-  body += `<div>📌 <strong>Created:</strong> ${formatDate(t.createdAt)}</div>`;
-  if (t.completedAt) body += `<div>✓ <strong>Completed:</strong> ${formatDate(t.completedAt)}</div>`;
-  body += '</div>';
-
-  if (otherAtt.length) {
-    body += `<div style="margin-top:4px"><div class="form-label" style="margin-bottom:8px">Attachments</div><div class="detail-att-grid">
-      ${otherAtt.map(a => `<a class="detail-att-item" href="${a.data}" download="${escHtml(a.name)}">
-        <span class="detail-att-icon">${fileIcon(a.type)}</span>
-        <div class="detail-att-name">${escHtml(a.name)}</div>
-        <div style="font-size:9px;color:var(--text-dim)">${formatSize(a.size)}</div>
-      </a>`).join('')}
-    </div></div>`;
-  }
-
-  document.getElementById('detail-body').innerHTML = body;
-  document.getElementById('detail-modal').classList.add('open');
-}
-
-function closeDetailModal() { document.getElementById('detail-modal').classList.remove('open'); }
-
-// ─── Notifications ────────────────────────────────────────────────────────
-async function toggleNotifications() {
-  if (!notifEnabled) {
-    if (!('Notification' in window)) { showToast('warning','Not supported','Browser notifications not available','⚠'); return; }
-    const perm = await Notification.requestPermission();
-    if (perm !== 'granted') { showToast('warning','Permission denied','Enable notifications in browser settings','🔔'); return; }
-    notifEnabled = true;
-    updateNotifUI();
-    startNotifLoop();
-    showToast('success','Notifications enabled','You will be reminded of upcoming deadlines','🔔');
-  } else {
-    notifEnabled = false;
-    if (notifInterval) { clearInterval(notifInterval); notifInterval = null; }
-    updateNotifUI();
-    showToast('warning','Notifications disabled','','🔕');
-  }
-}
-
-function updateNotifUI() {
-  document.getElementById('notif-label').textContent = notifEnabled ? 'Notifications On' : 'Notifications Off';
-  document.getElementById('notif-dot').className = 'dot' + (notifEnabled ? '' : ' off');
-  document.getElementById('notif-icon').textContent = notifEnabled ? '🔔' : '🔕';
-}
-
-function startNotifLoop() {
-  checkNotifications();
-  notifInterval = setInterval(checkNotifications, 60000); // every minute
-}
-
-let notifiedIds = new Set();
-function checkNotifications() {
-  if (!notifEnabled) return;
-  const now = new Date();
-  tasks.forEach(t => {
-    if (!t.deadline || t.status === 'completed') return;
-    const d = new Date(t.deadline);
-    const diff = d - now;
-    const key1h = t.id + '_1h', key24h = t.id + '_24h', keyOD = t.id + '_od';
-
-    // Overdue
-    if (diff < 0 && !notifiedIds.has(keyOD)) {
-      notifiedIds.add(keyOD);
-      new Notification('⚠ DEADLINE MISSED', { body: t.title, icon: '' });
-      showToast('urgent','Deadline Missed!',t.title,'⚠');
-    }
-    // 1 hour warning
-    if (diff > 0 && diff < 3600000 && !notifiedIds.has(key1h)) {
-      notifiedIds.add(key1h);
-      new Notification('🔔 Due in < 1 hour', { body: t.title });
-      showToast('warning','Due in less than 1 hour',t.title,'⏰');
-    }
-    // 24 hour warning
-    if (diff > 0 && diff < 86400000 && diff >= 3600000 && !notifiedIds.has(key24h)) {
-      notifiedIds.add(key24h);
-      new Notification('📅 Due Tomorrow', { body: t.title });
-      showToast('warning','Due within 24 hours',t.title,'📅');
-    }
-  });
-}
-
-// In-app toast
-function showToast(type, title, msg, icon) {
-  const container = document.getElementById('toast-container');
-  const id = uid();
-  const el = document.createElement('div');
-  el.className = `toast ${type}`;
-  el.id = 'toast-' + id;
-  el.innerHTML = `<span class="toast-icon">${icon}</span>
-    <div class="toast-content">
-      <div class="toast-title">${escHtml(title)}</div>
-      ${msg ? `<div class="toast-msg">${escHtml(msg)}</div>` : ''}
+  list.innerHTML = tasks.map(t => `
+    <div class="task-card">
+      <div class="task-header">
+        <div onclick="toggleComplete('${t.id}')">
+          ${t.status === 'completed' ? '✓' : '□'}
+        </div>
+        <div class="task-title">${t.title}</div>
+        <button onclick="deleteTask('${t.id}')">✕</button>
+      </div>
+      <div>${t.description || ''}</div>
+      <small>${t.deadline ? new Date(t.deadline).toLocaleString() : ''}</small>
     </div>
-    <button class="toast-close" onclick="removeToast('${id}')">✕</button>`;
-  container.appendChild(el);
-  setTimeout(() => removeToast(id), 4500);
-}
-function removeToast(id) {
-  const el = document.getElementById('toast-' + id);
-  if (el) el.remove();
+  `).join('');
 }
 
-// Close modals on overlay click
-document.getElementById('task-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); });
-document.getElementById('detail-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeDetailModal(); });
+// ─── GLOBAL FUNCTIONS (important) ──────────────────
+window.saveTask = saveTask;
+window.deleteTask = deleteTask;
+window.toggleComplete = toggleComplete;
+window.openEdit = openEdit;
 
-// Keyboard shortcuts
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { closeModal(); closeDetailModal(); }
-  if ((e.ctrlKey || e.metaKey) && e.key === 'n') { e.preventDefault(); openAddModal(); }
-});
-
-// Live countdown update every minute
-setInterval(renderTasks, 60000);
-
-// ─── Init ─────────────────────────────────────────────────────────────────
+// INIT
 renderTasks();
 </script>
 </body>
